@@ -14,12 +14,15 @@ import ssl
 import threading
 import time
 from email.message import EmailMessage
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 LOG = logging.getLogger('monitor')
 USER_FIELDS = ('id', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'date_joined')
 KEY_FIELDS = ('id', 'name', 'group_id', 'creator_id', 'created_at', 'updated_at')
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+# libpq defaults to sslmode=prefer, which silently accepts plaintext and verifies nothing.
+SECURE_SSLMODES = ('require', 'verify-ca', 'verify-full')
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -32,7 +35,10 @@ def get_json(url, key=None):
     if key:
         headers['X-API-Key'] = key
     with build_opener(NoRedirect).open(Request(url, headers=headers), timeout=30) as response:
-        return json.load(response)
+        payload = response.read(MAX_RESPONSE_BYTES + 1)
+    if len(payload) > MAX_RESPONSE_BYTES:
+        raise ValueError('Response exceeds the maximum size')
+    return json.loads(payload)
 
 
 def project(rows, fields):
@@ -47,12 +53,18 @@ def project(rows, fields):
     return result
 
 
+def flag(name):
+    return os.environ.get(name, 'false').lower() == 'true'
+
+
 class Config:
     def __init__(self):
         self.url = os.environ.get('METABASE_URL', '').rstrip('/')
         parsed = urlparse(self.url)
         if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.query or parsed.fragment:
             raise ValueError('METABASE_URL must be an HTTP(S) instance URL without credentials/query/fragment')
+        if parsed.scheme == 'http' and not flag('ALLOW_INSECURE_URL'):
+            raise ValueError('METABASE_URL must use https, which the API key travels over; set ALLOW_INSECURE_URL=true to send it in cleartext')
         self.key = os.environ.get('METABASE_API_KEY', '')
         self.db = os.environ.get('METABASE_DATABASE_URL', '')
         self.source = os.environ.get('ENTITY_SOURCE', 'api')
@@ -60,8 +72,12 @@ class Config:
             raise ValueError('ENTITY_SOURCE must be api or database')
         if self.source == 'api' and not self.key:
             raise ValueError('METABASE_API_KEY is required in API mode')
-        if self.source == 'database' and not self.db.startswith(('postgresql://', 'postgres://')):
-            raise ValueError('Database mode requires a PostgreSQL METABASE_DATABASE_URL')
+        if self.source == 'database':
+            if not self.db.startswith(('postgresql://', 'postgres://')):
+                raise ValueError('Database mode requires a PostgreSQL METABASE_DATABASE_URL')
+            sslmode = parse_qs(urlparse(self.db).query).get('sslmode', [''])[-1]
+            if sslmode not in SECURE_SSLMODES and not flag('ALLOW_INSECURE_DB'):
+                raise ValueError('METABASE_DATABASE_URL needs sslmode=verify-full (or require/verify-ca); set ALLOW_INSECURE_DB=true to accept an unverified connection')
         self.interval = int(os.environ.get('POLL_INTERVAL_SECONDS', '300'))
         if self.interval < 30:
             raise ValueError('POLL_INTERVAL_SECONDS must be at least 30')
@@ -70,6 +86,8 @@ class Config:
         self.smtp_mode = os.environ.get('SMTP_SECURITY', 'starttls')
         if self.smtp_mode not in ('starttls', 'ssl', 'none'):
             raise ValueError('SMTP_SECURITY must be starttls, ssl, or none')
+        if self.smtp_mode == 'none' and os.environ.get('SMTP_USERNAME') and not flag('ALLOW_INSECURE_SMTP'):
+            raise ValueError('SMTP_SECURITY=none sends SMTP_PASSWORD in cleartext; use starttls or ssl, or set ALLOW_INSECURE_SMTP=true')
         self.smtp_port = int(os.environ.get('SMTP_PORT', '465' if self.smtp_mode == 'ssl' else '587'))
         self.sender = os.environ.get('SMTP_FROM', '')
         self.recipients = list(dict.fromkeys(x.strip() for x in next(csv.reader([os.environ.get('NOTIFY_EMAILS', '')])) if x.strip()))
@@ -170,6 +188,9 @@ def changes(old, new):
 class Store:
     def __init__(self, path, identity):
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Snapshots and queued mail hold account metadata; SQLite copies this mode to its journal.
+        path.touch(exist_ok=True)
+        path.chmod(0o600)
         self.conn = sqlite3.connect(path)
         self.conn.executescript('''
             CREATE TABLE IF NOT EXISTS snapshots (name TEXT PRIMARY KEY, value TEXT NOT NULL);

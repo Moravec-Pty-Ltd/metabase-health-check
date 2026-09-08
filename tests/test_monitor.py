@@ -1,11 +1,22 @@
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from monitor import compare_versions, Store, Sources, changes, cycle, deliver, project, USER_FIELDS
+from monitor import (Config, MAX_RESPONSE_BYTES, Store, Sources, changes, compare_versions, cycle,
+                     deliver, get_json, project, USER_FIELDS)
+
+BASE_ENV = {'METABASE_URL': 'https://metabase.example.com', 'METABASE_API_KEY': 'k',
+            'SMTP_HOST': 'smtp.example.com', 'SMTP_FROM': 'a@example.com', 'NOTIFY_EMAILS': 'b@example.com'}
+
+
+def config(**overrides):
+    with patch.dict(os.environ, {**BASE_ENV, **overrides}, clear=True):
+        return Config()
 
 
 class MonitorTests(unittest.TestCase):
@@ -97,6 +108,52 @@ class MonitorTests(unittest.TestCase):
     def test_duplicates_rejected(self):
         with self.assertRaises(ValueError):
             project([{'id': 1}, {'id': 1}], USER_FIELDS)
+
+    def test_state_file_is_private(self):
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+
+
+class TransportTests(unittest.TestCase):
+    def test_http_url_needs_optin(self):
+        insecure = {'METABASE_URL': 'http://metabase.internal'}
+        with self.assertRaises(ValueError):
+            config(**insecure)
+        self.assertEqual(config(**insecure, ALLOW_INSECURE_URL='true').url, 'http://metabase.internal')
+
+    def test_smtp_auth_without_tls_needs_optin(self):
+        plaintext = {'SMTP_SECURITY': 'none', 'SMTP_USERNAME': 'monitor'}
+        with self.assertRaises(ValueError):
+            config(**plaintext)
+        self.assertEqual(config(**plaintext, ALLOW_INSECURE_SMTP='true').smtp_mode, 'none')
+        self.assertEqual(config(SMTP_SECURITY='none').smtp_mode, 'none')
+
+    def test_database_url_needs_verified_tls(self):
+        base = 'postgresql://monitor:pw@postgres:5432/metabase'
+        for url in (base, base + '?sslmode=disable', base + '?sslmode=prefer'):
+            with self.assertRaises(ValueError):
+                config(ENTITY_SOURCE='database', METABASE_DATABASE_URL=url)
+        self.assertTrue(config(ENTITY_SOURCE='database', METABASE_DATABASE_URL=base + '?sslmode=verify-full').db)
+        self.assertTrue(config(ENTITY_SOURCE='database', METABASE_DATABASE_URL=base, ALLOW_INSECURE_DB='true').db)
+
+    def test_oversized_response_rejected(self):
+        def opener(payload):
+            class Response:
+                def read(self, size):
+                    return payload[:size]
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    return False
+            return lambda *_: SimpleNamespace(open=lambda *a, **k: Response())
+        with patch('monitor.MAX_RESPONSE_BYTES', 10):
+            with patch('monitor.build_opener', opener(b'{"a": 1}')):
+                self.assertEqual(get_json('https://example.com'), {'a': 1})
+            with patch('monitor.build_opener', opener(b'{"a": ' + b'1' * 50 + b'}')):
+                with self.assertRaises(ValueError):
+                    get_json('https://example.com')
+        self.assertGreater(MAX_RESPONSE_BYTES, 1024)
 
 
 if __name__ == '__main__':

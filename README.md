@@ -55,7 +55,7 @@ Compose reads `.env`; Coolify's Dockerfile deployment uses its environment setti
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `METABASE_URL` | required | Canonical instance URL, including any subpath; no `/api` suffix |
+| `METABASE_URL` | required | Canonical `https` instance URL, including any subpath; no `/api` suffix |
 | `METABASE_API_KEY` | required in API mode | Key assigned to the Administrators group for complete listings |
 | `ENTITY_SOURCE` | `api` | `api` or `database` for user and API-key checks |
 | `METABASE_DATABASE_URL` | empty | PostgreSQL application-database URI, used only in database mode |
@@ -65,13 +65,18 @@ Compose reads `.env`; Coolify's Dockerfile deployment uses its environment setti
 | `STATE_PATH` | `/data/state.sqlite3` | Durable SQLite snapshots and outgoing notifications |
 | `SMTP_HOST` | required | SMTP server hostname |
 | `SMTP_PORT` | `587` | SMTP port; defaults to 465 when security is `ssl` |
-| `SMTP_SECURITY` | `starttls` | `starttls`, `ssl`, or `none` for a trusted local relay |
+| `SMTP_SECURITY` | `starttls` | `starttls`, `ssl`, or `none` for an unauthenticated local relay |
 | `SMTP_USERNAME` | empty | Optional SMTP login |
 | `SMTP_PASSWORD` | empty | SMTP password |
 | `SMTP_FROM` | required | Plain sender email address |
 | `NOTIFY_EMAILS` | required | Comma-separated plain email addresses; duplicates removed |
+| `ALLOW_INSECURE_URL` | `false` | Permit an `http` `METABASE_URL`, sending the API key in cleartext |
+| `ALLOW_INSECURE_SMTP` | `false` | Permit `SMTP_USERNAME` with `SMTP_SECURITY=none`, sending the password in cleartext |
+| `ALLOW_INSECURE_DB` | `false` | Permit a `METABASE_DATABASE_URL` without `sslmode=require` or stronger |
 
 Example recipient list: `admin@example.com,ops@example.com`. This is a CSV environment value, not an uploaded file. Recipients receive individual messages and cannot see the other recipients. Queued messages retain the recipient list that was configured when the change was observed.
+
+The three `ALLOW_INSECURE_*` flags each unlock one cleartext transport and default to off, so a misconfiguration fails at startup rather than leaking a credential. Turn one on only for a path you control end to end, such as a loopback SMTP relay.
 
 ## API mode and compatibility
 
@@ -94,8 +99,10 @@ If the API does not expose the needed metadata, configure an explicit database s
 
 ```dotenv
 ENTITY_SOURCE=database
-METABASE_DATABASE_URL=postgresql://monitor:URL_ENCODED_PASSWORD@postgres:5432/metabase?sslmode=require
+METABASE_DATABASE_URL=postgresql://monitor:URL_ENCODED_PASSWORD@postgres:5432/metabase?sslmode=verify-full&sslrootcert=/data/ca.crt
 ```
+
+The URL must set `sslmode` to `require`, `verify-ca`, or `verify-full`, otherwise startup fails. Prefer `verify-full` with an `sslrootcert`: `require` encrypts but validates no certificate, so it does not stop a machine-in-the-middle. libpq's own default, `prefer`, silently falls back to plaintext. To connect over a local socket or an already-encrypted tunnel, set `ALLOW_INSECURE_DB=true`.
 
 This must be the **Metabase application database**, which stores accounts and settings, not a warehouse connected to Metabase for analytics. This implementation supports **PostgreSQL only**, not MySQL or H2. Version checks still use the instance URL; the API key is optional in this mode if session properties are publicly available.
 
@@ -119,8 +126,8 @@ Database mode is a deliberate switch, not an automatic fallback: alternating sou
 - Polling observes differences between snapshots. A create-and-delete or change-and-revert between polls can be missed. This is **not a complete audit log**.
 - SMTP delivery is at least once. A crash after SMTP accepts a message but before its acknowledgement is saved can cause a duplicate. A prolonged SMTP outage grows the durable outbox, so monitor disk usage.
 - Failed checks and mail delivery appear in logs. The Docker health check becomes unhealthy after three polling intervals without a completely successful cycle (minimum 180 seconds). There are no immediate outage emails. The startup status email tests SMTP delivery.
-- TLS certificates are verified. HTTP redirects are rejected to prevent credential forwarding; configure the final canonical Metabase URL.
-- Snapshots and mail contain account metadata, including email addresses. Restrict access to the volume and backups. Logs omit response bodies and raw exception messages to avoid credential leakage.
+- TLS certificates are verified. HTTP redirects are rejected to prevent credential forwarding; configure the final canonical Metabase URL. Responses over 8 MiB are rejected rather than parsed.
+- Snapshots and mail contain account metadata, including email addresses. The state file is created mode `600`, and SQLite gives its journal the same mode. Restrict access to the volume and backups. Logs omit response bodies and raw exception messages to avoid credential leakage.
 - Deactivating or rotating the monitoring key can stop API checks. GitHub outages/rate limiting can make the overall health check unhealthy; disable release checks for isolated deployments.
 
 ## Development
