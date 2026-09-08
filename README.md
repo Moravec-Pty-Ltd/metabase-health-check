@@ -126,7 +126,7 @@ Database mode is a deliberate switch, not an automatic fallback: alternating sou
 - Polling observes differences between snapshots. A create-and-delete or change-and-revert between polls can be missed. This is **not a complete audit log**.
 - SMTP delivery is at least once. A crash after SMTP accepts a message but before its acknowledgement is saved can cause a duplicate. A prolonged SMTP outage grows the durable outbox, so monitor disk usage.
 - Failed checks and mail delivery appear in logs. The Docker health check becomes unhealthy after three polling intervals without a completely successful cycle (minimum 180 seconds). There are no immediate outage emails. The startup status email tests SMTP delivery.
-- TLS certificates are verified. HTTP redirects are rejected to prevent credential forwarding; configure the final canonical Metabase URL. Responses over 8 MiB are rejected rather than parsed.
+- TLS certificates are verified. HTTP redirects are rejected to prevent credential forwarding; configure the final canonical Metabase URL. Responses over 1 MiB are rejected rather than parsed; pages hold at most 100 rows, so real responses stay far below that.
 - Snapshots and mail contain account metadata, including email addresses. The state file is created mode `600`, and SQLite gives its journal the same mode. Restrict access to the volume and backups. Logs omit response bodies and raw exception messages to avoid credential leakage.
 - Deactivating or rotating the monitoring key can stop API checks. GitHub outages/rate limiting can make the overall health check unhealthy; disable release checks for isolated deployments.
 

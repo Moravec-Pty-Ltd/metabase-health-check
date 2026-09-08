@@ -20,7 +20,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 LOG = logging.getLogger('monitor')
 USER_FIELDS = ('id', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'date_joined')
 KEY_FIELDS = ('id', 'name', 'group_id', 'creator_id', 'created_at', 'updated_at')
-MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_RESPONSE_BYTES = 1024 * 1024
 # libpq defaults to sslmode=prefer, which silently accepts plaintext and verifies nothing.
 SECURE_SSLMODES = ('require', 'verify-ca', 'verify-full')
 
