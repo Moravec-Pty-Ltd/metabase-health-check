@@ -105,6 +105,28 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(body['checks']['version'], 'failed: OSError')
         self.assertIsNone(body['version']['installed'])
 
+    def test_advisories_alert_once_and_never_on_leaving_the_page(self):
+        pages = [{'GHSA-a': {'severity': 'high'}}, {'GHSA-b': {'severity': 'critical'}}, {'GHSA-b': {'severity': 'critical'}}]
+        source = SimpleNamespace(entities=lambda kind: {}, version=lambda: {'installed': {'tag': 'v0.65.3'}},
+                                 release=lambda: {'stable': {'tag': 'v0.65.3', 'url': 'u'}}, advisories=lambda: pages.pop(0))
+        config = SimpleNamespace(releases=True, recipients=['a'], state=self.path, status_interval=0)
+        with patch('monitor.deliver', return_value=True):
+            for _ in range(3):
+                self.assertTrue(cycle(self.store, source, config))
+        bodies = [json.loads(b) for (b,) in self.store.conn.execute('SELECT body FROM outbox')]
+        self.assertEqual(len(bodies), 1)
+        self.assertEqual([(e['event'], e['id']) for e in bodies[0]['changes']], [('created', 'GHSA-b')])
+
+    def test_volume_only_runs_in_database_mode(self):
+        calls = []
+        source = SimpleNamespace(entities=lambda kind: {}, version=lambda: {'installed': {'tag': 'v0.65.3'}},
+                                 volume=lambda: calls.append(1) or {})
+        for mode, expected in (('api', 0), ('database', 1)):
+            config = SimpleNamespace(source=mode, releases=False, recipients=[], state=self.path, status_interval=0)
+            with patch('monitor.deliver', return_value=True):
+                cycle(self.store, source, config)
+            self.assertEqual(len(calls), expected)
+
     def test_duplicates_rejected(self):
         with self.assertRaises(ValueError):
             project([{'id': 1}, {'id': 1}], USER_FIELDS)
