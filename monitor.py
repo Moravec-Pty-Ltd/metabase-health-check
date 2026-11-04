@@ -19,7 +19,7 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 
 LOG = logging.getLogger('monitor')
 USER_FIELDS = ('id', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'date_joined')
-KEY_FIELDS = ('id', 'name', 'group_id', 'creator_id', 'created_at', 'updated_at')
+KEY_FIELDS = ('id', 'name', 'user_id', 'creator_id', 'created_at', 'updated_at')
 ADVISORY_FIELDS = ('severity', 'summary', 'published_at', 'html_url')
 ADVISORIES_URL = 'https://api.github.com/repos/metabase/metabase/security-advisories?per_page=10'
 # These read a moving window, so an entry leaving it is not a change worth an email.

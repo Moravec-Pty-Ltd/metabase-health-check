@@ -15,7 +15,7 @@ GitHub stable releases ──┘
 | Check | Alerts on | Source |
 | --- | --- | --- |
 | Users | Creation, removal, email/name changes, activation and administrator status | Metabase API or application PostgreSQL |
-| API keys | Creation, removal, name/group/creator/timestamp changes exposed by the source | Metabase API or application PostgreSQL |
+| API keys | Creation, removal, name/user/creator/timestamp changes exposed by the source | Metabase API or application PostgreSQL |
 | Installed version | A change in the instance's version tag | Metabase session properties API |
 | Stable releases | A change in GitHub's latest stable Metabase release | GitHub Releases API |
 | Security advisories | A new or changed Metabase advisory, including those with no CVE id | GitHub security advisories API |
@@ -116,7 +116,7 @@ GRANT CONNECT ON DATABASE metabase TO monitor;
 GRANT USAGE ON SCHEMA public TO monitor;
 GRANT SELECT (id, email, first_name, last_name, is_active, is_superuser, date_joined)
   ON public.core_user TO monitor;
-GRANT SELECT (id, name, group_id, creator_id, created_at, updated_at)
+GRANT SELECT (id, name, user_id, creator_id, created_at, updated_at)
   ON public.api_key TO monitor;
 GRANT SELECT (executor_id, started_at, result_rows, context)
   ON public.query_execution TO monitor;
