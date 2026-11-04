@@ -20,6 +20,10 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler
 LOG = logging.getLogger('monitor')
 USER_FIELDS = ('id', 'email', 'first_name', 'last_name', 'is_active', 'is_superuser', 'date_joined')
 KEY_FIELDS = ('id', 'name', 'group_id', 'creator_id', 'created_at', 'updated_at')
+ADVISORY_FIELDS = ('severity', 'summary', 'published_at', 'html_url')
+ADVISORIES_URL = 'https://api.github.com/repos/metabase/metabase/security-advisories?per_page=10'
+# These read a moving window, so an entry leaving it is not a change worth an email.
+ACCUMULATED_CHECKS = ('advisories', 'volume')
 MAX_RESPONSE_BYTES = 1024 * 1024
 # libpq defaults to sslmode=prefer, which silently accepts plaintext and verifies nothing.
 SECURE_SSLMODES = ('require', 'verify-ca', 'verify-full')
@@ -97,6 +101,9 @@ class Config:
         if not self.smtp_host or not self.recipients:
             raise ValueError('SMTP_HOST, SMTP_FROM, and NOTIFY_EMAILS are required')
         self.releases = os.environ.get('CHECK_RELEASES', 'true').lower() == 'true'
+        self.volume_rows = int(os.environ.get('VOLUME_ALERT_ROWS', '50000'))
+        if self.volume_rows < 1:
+            raise ValueError('VOLUME_ALERT_ROWS must be positive')
         self.status_interval = int(os.environ.get('STATUS_INTERVAL_SECONDS', '604800'))
         if self.status_interval < 0:
             raise ValueError('STATUS_INTERVAL_SECONDS must be zero or positive')
@@ -133,15 +140,32 @@ class Sources:
         if self.c.source == 'api':
             path = '/api/user/?status=all' if kind == 'users' else '/api/api-key/'
             return project(self.api_rows(path), fields)
-        import psycopg
-        from psycopg.rows import dict_row
         table = 'core_user' if kind == 'users' else 'api_key'
         # Fixed allowlist: never read password hashes, key hashes, salts, or tokens.
+        rows = self.query(f'SELECT {", ".join(fields)} FROM {table}')
+        return json.loads(json.dumps(project(rows, fields), default=str))
+
+    def query(self, sql, params=None):
+        import psycopg
+        from psycopg.rows import dict_row
         with psycopg.connect(self.c.db, connect_timeout=10, row_factory=dict_row) as conn:
             conn.execute('SET TRANSACTION READ ONLY')
             conn.execute("SET LOCAL statement_timeout = '15s'")
-            rows = conn.execute(f'SELECT {", ".join(fields)} FROM {table}').fetchall()
-        return json.loads(json.dumps(project(rows, fields), default=str))
+            return conn.execute(sql, params).fetchall()
+
+    def volume(self):
+        """Rows one account pulled in an hour. Bulk extraction can arrive as many small ad-hoc queries, not downloads."""
+        rows = self.query('''
+            SELECT coalesce(u.email, 'no login') AS account, date_trunc('hour', q.started_at) AS hour,
+                   sum(q.result_rows) AS result_rows, count(*) AS queries
+            FROM query_execution q LEFT JOIN core_user u ON u.id = q.executor_id
+            WHERE q.started_at > now() - interval '2 hours'
+              AND q.context::text NOT IN ('dashboard', 'pulse', 'dashboard-subscription')
+            GROUP BY 1, 2 HAVING sum(q.result_rows) >= %s''', (self.c.volume_rows,))
+        return json.loads(json.dumps({f"{r['account']} {r['hour']}": r for r in rows}, default=str))
+
+    def advisories(self):
+        return {a['ghsa_id']: {f: a.get(f) for f in ADVISORY_FIELDS} for a in get_json(ADVISORIES_URL)}
 
     def version(self):
         result = get_json(self.c.url + '/api/session/properties', self.c.key)
@@ -214,6 +238,10 @@ class Store:
             self.conn.execute('INSERT OR REPLACE INTO snapshots VALUES (?, ?)', (name, encoded))
         return len(events)
 
+    def accumulate(self, name, snapshot):
+        previous = self.conn.execute('SELECT value FROM snapshots WHERE name=?', (name,)).fetchone()
+        return {**json.loads(previous[0]), **snapshot} if previous else snapshot
+
     def status(self, report, recipients, interval, now=None):
         """Queue immediately on first run, then on a durable interval."""
         if not interval:
@@ -271,11 +299,16 @@ def cycle(store, sources, config):
     checks = {'users': lambda: sources.entities('users'), 'api_keys': lambda: sources.entities('api_keys'), 'version': sources.version}
     if config.releases:
         checks['releases'] = sources.release
+        checks['advisories'] = sources.advisories
+    if getattr(config, 'source', 'api') == 'database':
+        checks['volume'] = sources.volume
     ok = True
     results, snapshots = {}, {}
     for name, check in checks.items():
         try:
             snapshots[name] = check()
+            if name in ACCUMULATED_CHECKS:
+                snapshots[name] = store.accumulate(name, snapshots[name])
             count = store.observe(name, snapshots[name], config.recipients)
             results[name] = 'ok'
             LOG.info('%s: %d changes', name, count)

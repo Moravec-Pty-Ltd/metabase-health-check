@@ -18,6 +18,8 @@ GitHub stable releases ──┘
 | API keys | Creation, removal, name/group/creator/timestamp changes exposed by the source | Metabase API or application PostgreSQL |
 | Installed version | A change in the instance's version tag | Metabase session properties API |
 | Stable releases | A change in GitHub's latest stable Metabase release | GitHub Releases API |
+| Security advisories | A new or changed Metabase advisory, including those with no CVE id | GitHub security advisories API |
+| Query volume | One account pulling `VOLUME_ALERT_ROWS` rows or more in an hour, dashboards excluded | Application PostgreSQL (database mode only) |
 
 The first successful check of each source establishes a **quiet baseline**. Existing users and keys do not generate a flood of alerts. Subsequent changes are stored transactionally with the new snapshot, then emailed separately to each recipient. Failed recipients stay queued across restarts.
 
@@ -61,6 +63,7 @@ Compose reads `.env`; Coolify's Dockerfile deployment uses its environment setti
 | `METABASE_DATABASE_URL` | empty | PostgreSQL application-database URI, used only in database mode |
 | `POLL_INTERVAL_SECONDS` | `300` | Delay between completed polling cycles; minimum 30 |
 | `CHECK_RELEASES` | `true` | Set `false` to disable GitHub release checks |
+| `VOLUME_ALERT_ROWS` | `50000` | Rows per account per hour that raise a query volume alert |
 | `STATUS_INTERVAL_SECONDS` | `604800` | Status email on first run and every seven days; `0` disables |
 | `STATE_PATH` | `/data/state.sqlite3` | Durable SQLite snapshots and outgoing notifications |
 | `SMTP_HOST` | required | SMTP server hostname |
@@ -115,6 +118,8 @@ GRANT SELECT (id, email, first_name, last_name, is_active, is_superuser, date_jo
   ON public.core_user TO monitor;
 GRANT SELECT (id, name, group_id, creator_id, created_at, updated_at)
   ON public.api_key TO monitor;
+GRANT SELECT (executor_id, started_at, result_rows, context)
+  ON public.query_execution TO monitor;
 ```
 
 Create the role/password separately through your normal database administration process. These grants assume the `public` schema and the listed Metabase schema layout. Internal tables can change between versions; missing columns cause a failed check rather than a partial snapshot. Set the PostgreSQL role's search path appropriately if your tables are elsewhere.
